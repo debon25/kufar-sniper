@@ -4,7 +4,7 @@ on:
   schedule:
     # Запускать новую смену каждые 6 часов
     - cron: '0 */6 * * *'
-  workflow_dispatch: # Позволяет запустить вручную кнопкой
+  workflow_dispatch:
 
 concurrency:
   group: kufar-bot-group
@@ -19,13 +19,16 @@ jobs:
       - name: Скачивание кода
         uses: actions/checkout@v4
 
-      - name: Восстановление базы просмотренных объявлений
+      - name: Восстановление базы и кэша рынка
         uses: actions/cache@v4
         with:
-          path: seen_ads.json
-          key: seen-ads-${{ github.run_id }}
+          path: |
+            seen_ads.json
+            market_cache.json
+            seen_sellers.json
+          key: sniper-cache-${{ github.run_id }}
           restore-keys: |
-            seen-ads-
+            sniper-cache-
 
       - name: Установка Python
         uses: actions/setup-python@v5
