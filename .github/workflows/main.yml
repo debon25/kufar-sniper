@@ -1,0 +1,44 @@
+name: Kufar Sniper 24/7
+
+on:
+  schedule:
+    # Запускать новую смену каждые 6 часов
+    - cron: '0 */6 * * *'
+  workflow_dispatch: # Позволяет запустить вручную кнопкой
+
+concurrency:
+  group: kufar-bot-group
+  cancel-in-progress: false
+
+jobs:
+  run-bot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 355
+
+    steps:
+      - name: Скачивание кода
+        uses: actions/checkout@v4
+
+      - name: Восстановление базы просмотренных объявлений
+        uses: actions/cache@v4
+        with:
+          path: seen_ads.json
+          key: seen-ads-${{ github.run_id }}
+          restore-keys: |
+            seen-ads-
+
+      - name: Установка Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Установка requests
+        run: pip install requests
+
+      - name: Запуск парсера
+        env:
+          TG_TOKEN: ${{ secrets.TG_TOKEN }}
+          TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+          PROXY_URL: ${{ secrets.PROXY_URL }}
+          MAX_RUN_HOURS: '5.8'
+        run: python -u bot.py
