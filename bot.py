@@ -25,7 +25,7 @@ MIN_INTERVAL = 5
 MAX_INTERVAL = 12
 
 # Коэффициент реальной сделки (0.90 = минус 10% от медианы хотелок Куфара на торг)
-BARGAIN_FACTOR = 0.90
+BARGAIN_FACTOR = 1.05  # +5% к медиане хотелок (честная рыночная цена)
 
 # Пороги выгоды (в BYN и %)
 FAT_PROFIT_BYN = 85       # От 85 BYN выгоды -> ЖИР (СО ЗВУКОМ)
@@ -40,8 +40,7 @@ SELLERS_FILE = "seen_sellers.json"
 MARKET_CACHE_TTL = 4 * 3600  # Кэш рынка живет 4 часа
 # =============================================
 
-# 1. БЕЛЫЙ СПИСОК МОДЕЛЕЙ (От сложных названий к простым, чтобы не путать Pro Max и обычные)
-# Формат: (ID модели, бренд, регулярка для поиска, список доступной памяти [минимальная первая], поисковый запрос)
+# 1. БЕЛЫЙ СПИСОК МОДЕЛЕЙ
 MODELS_WHITELIST = [
     # --- APPLE iPHONE ---
     ("iPhone 13 Pro Max", "apple", r"\b13\s*(?:pro\s*max|про\s*макс|промакс|promax)\b", [128, 256, 512], "iPhone 13 Pro Max"),
@@ -101,7 +100,7 @@ MODELS_WHITELIST = [
     ("Pixel 6", "android", r"\bpixel\s*6\b|\bпиксель\s*6\b", [128, 256], "Pixel 6"),
 ]
 
-# 2. ЖЕСТКИЙ BLACKLIST (Магазины, скупки, критический брак, блокировки)
+# 2. ЖЕСТКИЙ BLACKLIST
 STOP_PATTERNS = [
     r"\bрассрочк[ауеи]\b", r"\bкредит\b", r"\bдоставка по рб\b",
     r"\bтрейд[\s\-]*ин\b", r"\btrade[\s\-]*in\b", r"\bскупк[аи]\b", r"\bвыкуп\b",
@@ -116,21 +115,19 @@ STOP_PATTERNS = [
     r"\bкопия\b", r"\bреплика\b", r"\bмуляж\b"
 ]
 
-# 3. УМНЫЙ ФИЛЬТР ЗАМЕНЕННОГО АКБ И ЭКРАНА НА iPHONE (Пропускает "НЕ менялся", банит "менялся")
+# 3. ФИЛЬТР ЗАМЕНЕННОГО АКБ
 FOREIGN_BATTERY_PATTERNS = [
     r"(?<!не\s)(?<!не)\b(?:акб|батаре[яюи]|аккумулятор)\s+(?:менял[асьсяи]+|заменен[аы]?|нов[аяый]|не\s*родн[аяой]|усиленн[аяый])",
     r"(?<!не\s)(?<!не)\b(?:менял[асьсяи]+|заменен[аы]?)\s+(?:акб|батаре[яюи]|аккумулятор|экран|дисплей)",
     r"\bнеизвестная деталь\b", r"\bошибка акб\b", r"\bошибка аккумулятора\b", r"\bбез отображения емкости\b"
 ]
 
-# 4. ТРИГГЕРЫ РЕАЛЬНОЙ СРОЧНОСТИ (Только жесткие причины, без мусора вроде "торг")
 URGENT_WORDS = [
     "срочно", "очень срочно", "только сегодня", "до вечера", "до завтра",
     "актуально сегодня", "быстрым", "уезжаю", "переезд", "нужны деньги",
     "подарили новый", "купил новый"
 ]
 
-# 5. МОДИФИКАТОРЫ СОСТОЯНИЯ (Для сдвига рыночной цены лота вверх или вниз)
 DEFECT_PATTERNS = [
     r"\bскол[ыаов]?\b", r"\bвмятин[аы]\b", r"\bпотертост[иь]\b",
     r"\bцарапин[аы] на экране\b", r"\bглубокие царапины\b", r"\bкоцк[иа]\b",
@@ -154,7 +151,6 @@ if PROXY_URL:
     session.proxies.update({"http": PROXY_URL, "https": PROXY_URL})
 
 
-# ================= БАЗА И КЭШ =================
 def load_json_file(filename, default_val):
     if os.path.exists(filename):
         try:
@@ -173,7 +169,6 @@ def save_json_file(filename, data):
         print(f"⚠️ Ошибка сохранения {filename}: {e}")
 
 
-# ================= НОРМАЛИЗАТОР И ФИЛЬТРЫ =================
 def clean_text(text):
     if not text:
         return ""
@@ -192,13 +187,11 @@ def check_regex_list(text, patterns):
 
 
 def is_bad_iphone_battery(text, model_name):
-    """Проверяет замену АКБ на iPhone и невозможные 100% на старых моделях (XR, XS, 11, 12)."""
     t = clean_text(text)
     matched = check_regex_list(t, FOREIGN_BATTERY_PATTERNS)
     if matched:
         return f"Заменен АКБ/экран ('{matched}')"
 
-    # Детектор 100% АКБ на старых моделях (XR, XS, 11, 12, SE 2020)
     old_models = ("iPhone XR", "iPhone XS", "iPhone XS Max", "iPhone 11", "iPhone 11 Pro",
                   "iPhone 11 Pro Max", "iPhone 12", "iPhone 12 mini", "iPhone 12 Pro", "iPhone SE 2020")
     if model_name in old_models:
@@ -208,8 +201,6 @@ def is_bad_iphone_battery(text, model_name):
 
 
 def extract_memory(text, ad_params, valid_memories):
-    """Извлекает память из параметров Куфара или текста (отсекая ОЗУ вроде 8/256 и цены)."""
-    # 1. Пробуем достать из ad_parameters Куфара
     if ad_params:
         for p in ad_params:
             if p.get("p") in ("phablet_phones_memory", "mobile_phones_memory", "memory"):
@@ -219,32 +210,23 @@ def extract_memory(text, ad_params, valid_memories):
                         return mem, False
 
     t = clean_text(text)
-    # 2. Формат Android ОЗУ/ПЗУ: 6/128, 8/256
     slash_match = re.search(r"\b(?:4|6|8|12|16)\s*/\s*(64|128|256|512)\b", t)
     if slash_match:
         mem = int(slash_match.group(1))
         if mem in valid_memories:
             return mem, False
 
-    # 3. Явное указание с единицами: 128 гб, 128gb, на 128
     for mem in valid_memories:
         if re.search(rf"\b{mem}\s*(?:гб|gb|гиг|г|g)\b|\bна\s*{mem}\b", t):
             return mem, False
 
-    # 4. Если ничего не нашли — берем минимальную память модели по низу рынка
     return valid_memories[0], True
 
 
 def normalize_phone(title, description="", ad_params=None):
-    """
-    Распознает модель и память.
-    Отсекает объявления, где перечислено сразу несколько разных моделей телефонов.
-    Возвращает: (dict с инфо о телефоне, причина отказа)
-    """
     t_title = clean_text(title)
     t_full = clean_text(f"{title} {description}")
 
-    # 1. Ищем все модели в заголовке (чтобы отсечь мульти-лоты вроде "iPhone 11 и XR")
     found_in_title = []
     temp_title = t_title
     for model_id, m_type, regex, mem_list, query_str in MODELS_WHITELIST:
@@ -256,11 +238,9 @@ def normalize_phone(title, description="", ad_params=None):
         names = [x[0] for x in found_in_title]
         return None, f"В заголовке сразу несколько моделей: {', '.join(names)}"
 
-    # Если в заголовке ровно 1 модель — берем её
     if len(found_in_title) == 1:
         model_id, m_type, mem_list, query_str = found_in_title[0]
     else:
-        # Иначе пробуем найти в полном тексте
         found_in_body = []
         temp_body = t_full
         for m_id, m_t, regex, m_l, q_s in MODELS_WHITELIST:
@@ -287,15 +267,10 @@ def normalize_phone(title, description="", ad_params=None):
 
 # ================= РАСЧЕТ РЫНКА (КУФАР + ONLINER) =================
 def fetch_kufar_sample_prices(phone_info, region_minsk=True):
-    """
-    Собирает до 100 объявлений на Куфаре по конкретной модели,
-    берет ТОЛЬКО лоты с явно указанной памятью и без маркеров брака/ремонта.
-    """
     prices = []
     cursor = None
     rgn_param = "&rgn=7" if region_minsk else ""
 
-    # Дополнительные слова в заголовке, которые занижают рынок (косяки, нюансы)
     lowball_words = STOP_PATTERNS + DEFECT_PATTERNS + [
         r"\bнюанс[ыа]?\b", r"\bдефект[ыа]?\b", r"\bпроблем[аы]\b",
         r"\bне работает\b", r"\bсломан\b", r"\bсрочно\b"
@@ -325,14 +300,11 @@ def fetch_kufar_sample_prices(phone_info, region_minsk=True):
                 if p_byn < 150 or p_byn > 2000:
                     continue
 
-                # Отсекаем брак, магазины и объявления со словом "нюанс/дефект" в заголовке
                 if check_regex_list(subj, lowball_words):
                     continue
 
-                # Проверяем точное совпадение модели и ЯВНО указанной памяти
                 norm, _ = normalize_phone(subj, "", ad.get("ad_parameters", []))
                 if norm and norm["model"] == phone_info["model"] and norm["memory"] == phone_info["memory"]:
-                    # Для iPhone отбрасываем слишком подозрительный демпинг (< 220 р для 11/12/13)
                     if phone_info["model"] in ("iPhone 11", "iPhone 12", "iPhone 13") and p_byn < 250:
                         continue
                     prices.append(p_byn)
@@ -352,7 +324,6 @@ def fetch_kufar_sample_prices(phone_info, region_minsk=True):
 
 
 def fetch_onliner_baraholka_prices(phone_info):
-    """Парсит цены с Барахолки Onliner, проверяя заголовок каждого лота через нормализатор и фильтр брака."""
     prices = []
     q = requests.utils.quote(f"{phone_info['query']} {phone_info['memory']}")
     url = f"https://baraholka.onliner.by/search.php?q={q}&f=213&cat=1"
@@ -360,7 +331,6 @@ def fetch_onliner_baraholka_prices(phone_info):
         resp = session.get(url, timeout=6)
         if resp.status_code == 200:
             html_text = resp.text
-            # Ищем заголовок лота и его цену в одной строке таблицы
             rows = re.findall(
                 r'class="wraptxt">.*?<a[^>]*>(.*?)</a>.*?class="price-primary">\s*(\d{3,4})\s*(?:р\.|руб|BYN)',
                 html_text, re.DOTALL | re.IGNORECASE
@@ -379,12 +349,26 @@ def fetch_onliner_baraholka_prices(phone_info):
     return prices
 
 
+def fetch_onliner_catalog_new_price(phone_info):
+    q = requests.utils.quote(f"{phone_info['query']} {phone_info['memory']}GB")
+    url = f"https://catalog.onliner.by/sdapi/catalog.api/search/mobile?query={q}"
+    try:
+        resp = session.get(url, timeout=5)
+        if resp.status_code == 200:
+            products = resp.json().get("products", [])
+            for prod in products:
+                full_name = prod.get("full_name", "")
+                norm, _ = normalize_phone(full_name)
+                if norm and norm["model"] == phone_info["model"] and norm["memory"] == phone_info["memory"]:
+                    prices_obj = prod.get("prices")
+                    if prices_obj and prices_obj.get("price_min"):
+                        return float(prices_obj["price_min"].get("amount", 0))
+    except Exception:
+        pass
+    return None
+
+
 def get_market_price(phone_info, market_cache):
-    """
-    Калиброванный расчет реального рынка:
-    Отрезает 30% низа (скрытые дефекты в описании) и 15% верха (оверпрайс),
-    считает медиану целых аппаратов и умножает на коэффициент торга (0.90).
-    """
     cache_key = phone_info["key"]
     now = time.time()
 
@@ -408,7 +392,6 @@ def get_market_price(phone_info, market_cache):
     all_prices.sort()
     n = len(all_prices)
     if n >= 7:
-        # Отрезаем 30% самого низа (скрытый брак без пометок в заголовке) и 15% самого верха
         cut_low = max(1, int(n * 0.30))
         cut_high = max(1, int(n * 0.15))
         core_prices = all_prices[cut_low: n - cut_high]
@@ -433,7 +416,19 @@ def get_market_price(phone_info, market_cache):
     save_json_file(MARKET_CACHE_FILE, market_cache)
     return real_market, n, new_price
 
-# ================= ЗАПРОСЫ К КУФАРУ И TELEGRAM =================
+
+def adjust_market_for_condition(base_market, full_text):
+    defect = check_regex_list(full_text, DEFECT_PATTERNS)
+    if defect:
+        return round(base_market * 0.90), f"📉 -10% к рынку (найдено: «{defect}»)", True
+
+    ideal = check_regex_list(full_text, IDEAL_PATTERNS)
+    if ideal:
+        return round(base_market * 1.07), f"💎 +7% к рынку («{ideal}»)", False
+
+    return base_market, "Стандартное состояние", False
+
+
 def get_ads():
     try:
         response = session.get(KUFAR_SEARCH_URL, timeout=8)
@@ -468,7 +463,6 @@ def parse_area(ad):
 
 
 def send_telegram(text, photo_url=None, with_sound=False):
-    """Отправляет карточку в ТГ. Если фото битое — автоматически дублирует текстом."""
     disable_sound = not with_sound
     try:
         if photo_url:
@@ -483,7 +477,6 @@ def send_telegram(text, photo_url=None, with_sound=False):
             r = session.post(url, data=payload, timeout=8)
             if r.status_code == 200:
                 return
-        # Если фото нет или Куфар еще не сгенерировал картинку (ошибка 400) — шлем текстом
         url = f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage"
         payload = {
             "chat_id": TG_CHAT_ID,
@@ -497,7 +490,6 @@ def send_telegram(text, photo_url=None, with_sound=False):
         print(f"⚠️ Ошибка отправки в Telegram: {e}")
 
 
-# ================= РЕЖИМ САМОПРОВЕРКИ (--test) =================
 def run_self_test(market_cache):
     print("🧪 ЗАПУСК САМОПРОВЕРКИ ВСЕХ СИСТЕМ БОТА...")
     t1, err1 = normalize_phone("Продам Айфон 11 на 128 гб в идеале")
@@ -525,7 +517,6 @@ def run_self_test(market_cache):
     print("✅ Тестовое сообщение отправлено в Telegram!")
 
 
-# ================= ОСНОВНОЙ ЦИКЛ =================
 def main():
     market_cache = load_json_file(MARKET_CACHE_FILE, {})
 
@@ -536,7 +527,6 @@ def main():
     start_time = time.time()
     max_seconds = MAX_RUN_HOURS * 3600
 
-    # seen_ads хранит словарь {"ad_id": цена_в_BYN} для отслеживания скидок
     raw_seen = load_json_file(SEEN_FILE, {})
     seen_ads = raw_seen if isinstance(raw_seen, dict) else {str(k): 0 for k in raw_seen}
     seen_sellers = load_json_file(SELLERS_FILE, {})
@@ -569,7 +559,6 @@ def main():
                 price_byn = int(ad.get("price_byn", "0")) / 100
                 price_drop_note = ""
 
-                # Проверяем: новое объявление или продавец скинул цену на старое
                 if ad_id in seen_ads:
                     old_price = seen_ads[ad_id]
                     if old_price > 0 and (old_price - price_byn) >= 20 and ((old_price - price_byn) / old_price) >= 0.05:
@@ -584,35 +573,26 @@ def main():
 
                 raw_title = ad.get("subject", "Без названия")
 
-                # --- ЭТАП 1: Быстрая проверка заголовка на стоп-слова ---
                 bad_title = check_regex_list(raw_title, STOP_PATTERNS)
                 if bad_title:
-                    print(f"⛔ [Бан заголовка: '{bad_title}'] {raw_title}")
                     continue
 
-                # --- ЭТАП 2: Загружаем описание и проверяем телефон ---
                 description = get_ad_description(ad_id)
                 full_text = f"{raw_title}\n{description}"
 
                 bad_desc = check_regex_list(description, STOP_PATTERNS)
                 if bad_desc:
-                    print(f"⛔ [Бан описания: '{bad_desc}'] {raw_title}")
                     continue
 
-                # Нормализация модели и памяти + отсев мульти-лотов
                 phone_info, norm_err = normalize_phone(raw_title, description, ad.get("ad_parameters", []))
                 if not phone_info:
-                    print(f"⏭ [Пропуск: {norm_err}] {raw_title}")
                     continue
 
-                # Если это iPhone — жесткая проверка на родной АКБ
                 if phone_info["type"] == "apple":
                     bat_err = is_bad_iphone_battery(full_text, phone_info["model"])
                     if bat_err:
-                        print(f"⛔ [Бан АКБ iPhone: {bat_err}] {raw_title}")
                         continue
 
-                # --- ЭТАП 3: Расчет рыночной цены и поправки на состояние ---
                 base_market, sample_cnt, new_catalog_price = get_market_price(phone_info, market_cache)
 
                 if base_market:
@@ -621,19 +601,16 @@ def main():
                     profit_pct = (profit_byn / adj_market) * 100 if adj_market > 0 else 0
                 else:
                     adj_market = None
-                    cond_note = "Мало аналогов (оцени вручную)"
+                    cond_note = "Мало аналогов"
                     has_defects = bool(check_regex_list(full_text, DEFECT_PATTERNS))
                     profit_byn = 0
                     profit_pct = 0
 
-                # Триггеры реальной срочности
                 matched_urgent = [w for w in URGENT_WORDS if w in clean_text(full_text)]
                 is_urgent = len(matched_urgent) > 0
 
-                # --- ЭТАП 4: Классификация лота (ЖИР / НЕ ЖИР / ПОД ОСМОТР / ИГНОР) ---
                 with_sound = False
                 if adj_market is None:
-                    # Редкая модель из белого списка — шлем тихо на всякий случай
                     tier_header = "📊 <b>РЕДКАЯ МОДЕЛЬ (Мало данных о рынке)</b>"
                 elif profit_byn >= FAT_PROFIT_BYN or profit_pct >= FAT_PROFIT_PCT or (is_urgent and profit_byn >= URGENT_PROFIT_BYN):
                     tier_header = "🚨🔥 <b>ЖИРНЫЙ ЛОТ! (ЗВОНИ ПЕРВЫМ)</b> 🔥🚨"
@@ -645,15 +622,13 @@ def main():
                     tier_header = "👀 <b>ПОД ОСМОТР / ТОРГ НА МЕСТЕ</b>"
                     with_sound = False
                 else:
-                    print(f"📉 [Мало выгоды: {profit_byn:.0f} BYN] {phone_info['key']} за {price_byn:.0f} BYN (Рынок ~{adj_market} BYN)")
                     continue
 
-                # Проверка на подозрительного продавца и аномальный скам
                 warnings = []
                 if adj_market and profit_pct >= 55:
-                    warnings.append("⚠️ <b>АНОМАЛЬНО ДЕШЕВО (>55% ниже рынка) — осторожно, возможен скам на предоплату!</b>")
+                    warnings.append("⚠️ <b>АНОМАЛЬНО ДЕШЕВО (>55% ниже рынка) — осторожно, скам!</b>")
                 if len(description.strip()) < 30:
-                    warnings.append("⚠️ <i>Пустое описание — внимательно осмотри фото на сколы!</i>")
+                    warnings.append("⚠️ <i>Пустое описание — проверь фото!</i>")
                 if phone_info["is_assumed_mem"]:
                     warnings.append(f"ℹ️ <i>Память не указана — рынок посчитан по минимуму ({phone_info['memory']} ГБ)</i>")
 
@@ -661,9 +636,8 @@ def main():
                 if seller_id:
                     seen_sellers[seller_id] = seen_sellers.get(seller_id, 0) + 1
                     if seen_sellers[seller_id] >= 3:
-                        warnings.append("👀 <i>Этот продавец уже выкладывал несколько телефонов (возможно, перекуп)</i>")
+                        warnings.append("👀 <i>Продавец выкладывал несколько телефонов (возможно, перекуп)</i>")
 
-                # Формируем карточку в Telegram
                 area = parse_area(ad)
                 link = ad.get("ad_link", f"https://www.kufar.by/item/{ad_id}")
                 images = ad.get("images", [])
@@ -692,7 +666,7 @@ def main():
                         f"📊 Реальный рынок (с торгом): <b>~{adj_market} BYN</b>{new_str}\n"
                         f"🛠 Коррекция: <i>{cond_note} (база {sample_cnt} шт.)</i>\n"
                         f"💵 Расчетная выгода: <b>{profit_byn:+.0f} BYN ({profit_pct:+.0f}%)</b>\n"
-                        f"🎯 <b>Торгуй до: ~{target_buy:.0f} BYN</b> (под маржу 100+ BYN)\n"
+                        f"🎯 <b>Торгуй до: ~{target_buy:.0f} BYN</b>\n"
                     )
 
                 if warnings:
@@ -702,16 +676,14 @@ def main():
                     msg += f"\n📝 <i>{short_desc}</i>\n"
 
                 msg += (
-                    f"\n💬 Шаблон в ЛС (нажми, чтобы скопировать):\n"
+                    f"\n💬 Шаблон в ЛС:\n"
                     f"<code>Здравствуйте! Готов приехать и забрать сегодня за наличные без лишних вопросов. Куда можно подъехать?</code>\n\n"
                     f"👉 <a href='{link}'><b>ОТКРЫТЬ ОБЪЯВЛЕНИЕ НА КУФАРЕ</b></a>"
                 )
 
-                print(f"✅ ОТПРАВЛЕНО [{phone_info['key']}]: {price_byn:.0f} BYN (Рынок ~{adj_market} BYN | Выгода {profit_byn:+.0f})")
                 send_telegram(msg, photo_url, with_sound=with_sound)
 
             if state_changed:
-                # Оставляем последние 800 объявлений в памяти
                 if len(seen_ads) > 800:
                     keys_to_keep = list(seen_ads.keys())[-800:]
                     seen_ads = {k: seen_ads[k] for k in keys_to_keep}
@@ -722,7 +694,6 @@ def main():
 
     save_json_file(SEEN_FILE, seen_ads)
     save_json_file(MARKET_CACHE_FILE, market_cache)
-    print("🔄 Смена 5.8 ч завершена. Передача эстафеты...")
 
 
 if __name__ == "__main__":
