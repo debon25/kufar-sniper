@@ -288,17 +288,23 @@ def normalize_phone(title, description="", ad_params=None):
 # ================= РАСЧЕТ РЫНКА (КУФАР + ONLINER) =================
 def fetch_kufar_sample_prices(phone_info, region_minsk=True):
     """
-    Собирает до 100 объявлений (2 страницы по 50 шт) на Куфаре по конкретной модели,
-    отсеивает чужие версии (Pro/Max), битые аппараты и магазины.
+    Собирает до 100 объявлений на Куфаре по конкретной модели,
+    берет ТОЛЬКО лоты с явно указанной памятью и без маркеров брака/ремонта.
     """
     prices = []
     cursor = None
     rgn_param = "&rgn=7" if region_minsk else ""
 
-    for _ in range(2):  # До 2 страниц по 50 объявлений = глубокий охват 100 лотов
+    # Дополнительные слова в заголовке, которые занижают рынок (косяки, нюансы)
+    lowball_words = STOP_PATTERNS + DEFECT_PATTERNS + [
+        r"\bнюанс[ыа]?\b", r"\bдефект[ыа]?\b", r"\bпроблем[аы]\b",
+        r"\bне работает\b", r"\bсломан\b", r"\bсрочно\b"
+    ]
+
+    for _ in range(2):
         url = (
             f"https://api.kufar.by/search-api/v2/search/rendered-paginated"
-            f"?cat=17010&cmp=0&cnd=1&lang=ru&prc=r%3A12000%2C150000{rgn_param}"
+            f"?cat=17010&cmp=0&cnd=1&lang=ru&prc=r%3A15000%2C150000{rgn_param}"
             f"&query={requests.utils.quote(phone_info['query'])}&size=50&sort=lst.d"
         )
         if cursor:
@@ -316,19 +322,21 @@ def fetch_kufar_sample_prices(phone_info, region_minsk=True):
             for ad in ads:
                 subj = ad.get("subject", "")
                 p_byn = int(ad.get("price_byn", "0")) / 100
-                if p_byn < 100 or p_byn > 2000:
+                if p_byn < 150 or p_byn > 2000:
                     continue
 
-                # Отсекаем брак и магазины из выборки
-                if check_regex_list(subj, STOP_PATTERNS):
+                # Отсекаем брак, магазины и объявления со словом "нюанс/дефект" в заголовке
+                if check_regex_list(subj, lowball_words):
                     continue
 
-                # Проверяем, что найденный аналог — это ТОЧНО та же модель и память
+                # Проверяем точное совпадение модели и ЯВНО указанной памяти
                 norm, _ = normalize_phone(subj, "", ad.get("ad_parameters", []))
                 if norm and norm["model"] == phone_info["model"] and norm["memory"] == phone_info["memory"]:
+                    # Для iPhone отбрасываем слишком подозрительный демпинг (< 220 р для 11/12/13)
+                    if phone_info["model"] in ("iPhone 11", "iPhone 12", "iPhone 13") and p_byn < 250:
+                        continue
                     prices.append(p_byn)
 
-            # Ищем токен следующей страницы (пагинация)
             next_token = None
             for page in data.get("pagination", {}).get("pages", []):
                 if page.get("label") == "next":
@@ -344,7 +352,7 @@ def fetch_kufar_sample_prices(phone_info, region_minsk=True):
 
 
 def fetch_onliner_baraholka_prices(phone_info):
-    """Дополнительный источник №1: парсит цены б/у аналогов с Барахолки Onliner (раздел Мобильные телефоны, f=213)."""
+    """Парсит цены с Барахолки Onliner, проверяя заголовок каждого лота через нормализатор и фильтр брака."""
     prices = []
     q = requests.utils.quote(f"{phone_info['query']} {phone_info['memory']}")
     url = f"https://baraholka.onliner.by/search.php?q={q}&f=213&cat=1"
@@ -352,45 +360,30 @@ def fetch_onliner_baraholka_prices(phone_info):
         resp = session.get(url, timeout=6)
         if resp.status_code == 200:
             html_text = resp.text
-            # Вытаскиваем блоки объявлений и цены в рублях с Барахолки
-            matches = re.findall(
-                r'class="ba-tbl-list__table".*?(\d{3,4})\s*(?:р\.|руб|BYN)',
+            # Ищем заголовок лота и его цену в одной строке таблицы
+            rows = re.findall(
+                r'class="wraptxt">.*?<a[^>]*>(.*?)</a>.*?class="price-primary">\s*(\d{3,4})\s*(?:р\.|руб|BYN)',
                 html_text, re.DOTALL | re.IGNORECASE
             )
-            for m in matches[:15]:
-                val = float(m)
-                if 120 <= val <= 1500:
-                    prices.append(val)
+            for title_html, price_str in rows[:20]:
+                clean_t = re.sub(r"<[^>]+>", "", title_html).strip()
+                val = float(price_str)
+                if check_regex_list(clean_t, STOP_PATTERNS + DEFECT_PATTERNS):
+                    continue
+                norm, _ = normalize_phone(clean_t)
+                if norm and norm["model"] == phone_info["model"] and norm["memory"] == phone_info["memory"]:
+                    if 150 <= val <= 1500:
+                        prices.append(val)
     except Exception:
         pass
     return prices
 
 
-def fetch_onliner_catalog_new_price(phone_info):
-    """Дополнительный источник №2: проверяет минимальную цену НОВОГО аппарата в Каталоге Onliner (потолок цены)."""
-    q = requests.utils.quote(f"{phone_info['query']} {phone_info['memory']}GB")
-    url = f"https://catalog.onliner.by/sdapi/catalog.api/search/mobile?query={q}"
-    try:
-        resp = session.get(url, timeout=5)
-        if resp.status_code == 200:
-            products = resp.json().get("products", [])
-            for prod in products:
-                full_name = prod.get("full_name", "")
-                norm, _ = normalize_phone(full_name)
-                if norm and norm["model"] == phone_info["model"] and norm["memory"] == phone_info["memory"]:
-                    prices_obj = prod.get("prices")
-                    if prices_obj and prices_obj.get("price_min"):
-                        return float(prices_obj["price_min"].get("amount", 0))
-    except Exception:
-        pass
-    return None
-
-
 def get_market_price(phone_info, market_cache):
     """
-    Гибридный расчет реального рынка:
-    Кэш -> 100 объявлений Куфара (Минск/РБ) + Барахолка Onliner -> Обрезка краев (15% низа и 20% верха)
-    -> Медиана -> Умножение на 0.90 (торг) -> Сверка с потолком нового из Каталога Onliner.
+    Калиброванный расчет реального рынка:
+    Отрезает 30% низа (скрытые дефекты в описании) и 15% верха (оверпрайс),
+    считает медиану целых аппаратов и умножает на коэффициент торга (0.90).
     """
     cache_key = phone_info["key"]
     now = time.time()
@@ -400,38 +393,31 @@ def get_market_price(phone_info, market_cache):
         if now - entry.get("ts", 0) < MARKET_CACHE_TTL:
             return entry["price"], entry["sample_size"], entry.get("new_price")
 
-    # 1. Собираем глубокую выборку по Минску
     kufar_prices = fetch_kufar_sample_prices(phone_info, region_minsk=True)
-
-    # Если в Минске мало чистых аналогов (< 5 шт) — расширяем статистику на всю Беларусь
-    if len(kufar_prices) < 5:
+    if len(kufar_prices) < 6:
         rb_prices = fetch_kufar_sample_prices(phone_info, region_minsk=False)
         if len(rb_prices) > len(kufar_prices):
             kufar_prices = rb_prices
 
-    # 2. Подтягиваем Барахолку Onliner
     baraholka_prices = fetch_onliner_baraholka_prices(phone_info)
     all_prices = kufar_prices + baraholka_prices
 
     if len(all_prices) < 3:
         return None, len(all_prices), None
 
-    # 3. Обрезка ценовых аномалий (отсекаем 15% самых дешевых и 20% самых дорогих)
     all_prices.sort()
     n = len(all_prices)
     if n >= 7:
-        cut_low = max(1, int(n * 0.15))
-        cut_high = max(1, int(n * 0.20))
+        # Отрезаем 30% самого низа (скрытый брак без пометок в заголовке) и 15% самого верха
+        cut_low = max(1, int(n * 0.30))
+        cut_high = max(1, int(n * 0.15))
         core_prices = all_prices[cut_low: n - cut_high]
     else:
         core_prices = all_prices
 
     raw_median = statistics.median(core_prices)
-
-    # 4. Поправка на реальный торг (-10%)
     real_market = round(raw_median * BARGAIN_FACTOR)
 
-    # 5. Сверка с ценой нового в Каталоге Onliner (б/у не может стоить дороже 78% нового)
     new_price = fetch_onliner_catalog_new_price(phone_info)
     if new_price and new_price > 200:
         max_used_cap = round(new_price * 0.78)
@@ -446,22 +432,6 @@ def get_market_price(phone_info, market_cache):
     }
     save_json_file(MARKET_CACHE_FILE, market_cache)
     return real_market, n, new_price
-
-
-def adjust_market_for_condition(base_market, full_text):
-    """Сдвигает рыночную цену конкретного телефона в зависимости от состояния (Сколы vs Идеал)."""
-    defect = check_regex_list(full_text, DEFECT_PATTERNS)
-    if defect:
-        # Штраф -10% за косметические косяки / сколы
-        return round(base_market * 0.90), f"📉 -10% к рынку (найдено: «{defect}»)", True
-
-    ideal = check_regex_list(full_text, IDEAL_PATTERNS)
-    if ideal:
-        # Бонус +7% за идеальное состояние / полный комплект
-        return round(base_market * 1.07), f"💎 +7% к рынку («{ideal}»)", False
-
-    return base_market, "Стандартное состояние", False
-
 
 # ================= ЗАПРОСЫ К КУФАРУ И TELEGRAM =================
 def get_ads():
